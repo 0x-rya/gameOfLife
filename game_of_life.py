@@ -17,6 +17,7 @@ class GameOfLife:
             looping_boundary: bool,
             density: float,
             alpha: float,           ## what fraction of the population gets updated
+            extremes: int           ## what +/- percent of 1 is to be considered for phase transition
         ) -> None:
         
         if not isinstance(sizeXY, abc.Iterable):
@@ -166,6 +167,15 @@ class GameOfLife:
                     nextIter[h][w] = self.getNextIter(w, h)
 
         self.automata = nextIter
+
+    def calcDensity(self) -> None:
+
+        ones = 0
+        for row in self.automata:
+            ones += sum(row)
+
+        density = ones/(self.height * self.width)
+        print("Density:", density)
     
     def record(self, save) -> None:
 
@@ -201,6 +211,7 @@ class GameOfLife:
         self.imgs.append(self.automata)
         for _ in range(self.timeStamps):
             self.updateAutomata()
+            self.calcDensity()
             self.imgs.append(self.automata)
         self.record(save=save)
 
@@ -216,7 +227,7 @@ if __name__ == "__main__":
             "RULE": "B3/S2,3",
             "DENSITY": 0.5,
             "ALPHA": 1,
-            "BETA": 1
+            "EXTREMES": 0
         }
 
     parser.add_argument("-D", "--defaults", action="store_true")
@@ -229,8 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--looping-boundary", action="store_true")
     parser.add_argument("-d", "--density", default=DEFAULTS["DENSITY"], type=float)
     parser.add_argument("-a", "--alpha", default=DEFAULTS["ALPHA"], type=float)
-    parser.add_argument("-b", "--beta", default=DEFAULTS["BETA"], type=float)
-    parser.add_argument("-g", "--gamma", action="store_true")
+    parser.add_argument("-e", "--extremes", default=DEFAULTS["EXTREMES"], type=float)
 
     parser.add_argument("-S", "--save", action="store_true")
 
@@ -248,5 +258,5 @@ if __name__ == "__main__":
     conway = GameOfLife((args.width, args.height),
                         args.timestamps, args.initconfig, args.rule,
                         args.looping_boundary, args.density,
-                        args.alpha)
+                        args.alpha, args.extremes)
     conway.simulate(save=args.save)
