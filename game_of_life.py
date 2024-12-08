@@ -17,8 +17,6 @@ class GameOfLife:
             looping_boundary: bool,
             density: float,
             alpha: float,           ## what fraction of the population gets updated
-            beta: float,            ## what random fraction of the neighbours should affect the cell
-            gamma: bool             ## random rules or not
         ) -> None:
         
         if not isinstance(sizeXY, abc.Iterable):
@@ -35,8 +33,6 @@ class GameOfLife:
             raise Exception("Invalid Rule.\nRule should be of format Bl,m,n,.../Sl,n,m\nExample: B3/S2,3...")
 
         self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
 
         if initConfig != None:
             self.automata = self.readInitConfig(initConfig)
@@ -252,5 +248,5 @@ if __name__ == "__main__":
     conway = GameOfLife((args.width, args.height),
                         args.timestamps, args.initconfig, args.rule,
                         args.looping_boundary, args.density,
-                        args.alpha, args.beta, args.gamma)
+                        args.alpha)
     conway.simulate(save=args.save)
