@@ -1,3 +1,4 @@
+from os import defpath
 import random
 import numpy as np
 from copy import deepcopy
@@ -17,6 +18,7 @@ class GameOfLife:
             looping_boundary: bool,
             density: float,
             alpha: float,           ## what fraction of the population gets updated
+            averageTimeStamp: int,
             extremes: int           ## what +/- percent of 1 is to be considered for phase transition
         ) -> None:
         
@@ -29,11 +31,13 @@ class GameOfLife:
         self.imgs: list[list[list[int]]] = []
         self.width = sizeXY[0]
         self.height = sizeXY[1]
+        self.avts = averageTimeStamp
         self.timeStamps = timeStamps
         if not self.validateRule(rule):
             raise Exception("Invalid Rule.\nRule should be of format Bl,m,n,.../Sl,n,m\nExample: B3/S2,3...")
 
         self.alpha = alpha
+        self.density = []
 
         if initConfig != None:
             self.automata = self.readInitConfig(initConfig)
@@ -168,16 +172,16 @@ class GameOfLife:
 
         self.automata = nextIter
 
-    def calcDensity(self) -> None:
+    def calcDensity(self) -> float:
 
         ones = 0
         for row in self.automata:
             ones += sum(row)
 
         density = ones/(self.height * self.width)
-        print("Density:", density)
+        return density
     
-    def record(self, save) -> None:
+    def record(self, save: bool | str) -> None:
 
         frames = []
         fig = plt.figure()
@@ -186,8 +190,8 @@ class GameOfLife:
             frames.append([plt.imshow(self.imgs[i], animated=True)])
         
         ani = animation.ArtistAnimation(fig, frames, interval=800, blit=True)
-        if save:
-            ani.save(f"GameOfLife.mp4")
+        if isinstance(save, str):
+            ani.save(f"outputs/{save}.mp4")
         plt.show()
 
     def getNextIter(self, x: int, y: int) -> int:
@@ -206,14 +210,16 @@ class GameOfLife:
             else:
                 return 0
 
-    def simulate(self, save: bool):
+    def simulate(self, vis: bool, save: bool | str):
 
         self.imgs.append(self.automata)
-        for _ in range(self.timeStamps):
+        for ts in range(self.timeStamps):
             self.updateAutomata()
-            self.calcDensity()
+            if ts >= self.avts:
+                self.density.append(self.calcDensity())
             self.imgs.append(self.automata)
-        self.record(save=save)
+        if vis:
+            self.record(save=save)
 
 if __name__ == "__main__":
     
@@ -222,27 +228,31 @@ if __name__ == "__main__":
     DEFAULTS = {
             "WIDTH": 50,
             "HEIGHT": 50,
-            "TIMESTAMPS": 15,
+            "AVTS": 1000,
+            "TIMESTAMPS": 1500,
             "INITCONFIG": None,
             "RULE": "B3/S2,3",
             "DENSITY": 0.5,
             "ALPHA": 1,
-            "EXTREMES": 0
+            "EXTREMES": 0,
+            "SAVEFILE": False
         }
 
     parser.add_argument("-D", "--defaults", action="store_true")
     parser.add_argument("-W", "--width", default=DEFAULTS["WIDTH"], type=int)
     parser.add_argument("-H", "--height", default=DEFAULTS["HEIGHT"], type=int)
+    parser.add_argument("-A", "--average-timestamp", default=DEFAULTS["AVTS"], type=int)
     parser.add_argument("-t", "--timestamps", default=DEFAULTS["TIMESTAMPS"], type=int)
     parser.add_argument("-i", "--initconfig", default=DEFAULTS["INITCONFIG"], type=str)
     parser.add_argument("-r", "--rule", default=DEFAULTS["RULE"], type=str)
     
-    parser.add_argument("-o", "--looping-boundary", action="store_true")
+    parser.add_argument("-l", "--looping-boundary", action="store_true")
     parser.add_argument("-d", "--density", default=DEFAULTS["DENSITY"], type=float)
     parser.add_argument("-a", "--alpha", default=DEFAULTS["ALPHA"], type=float)
     parser.add_argument("-e", "--extremes", default=DEFAULTS["EXTREMES"], type=float)
 
-    parser.add_argument("-S", "--save", action="store_true")
+    parser.add_argument("-V", "--visualize", action="store_true")
+    parser.add_argument("-S", "--save", default=DEFAULTS["SAVEFILE"], type=str)
 
     args = parser.parse_args()
 
@@ -258,5 +268,6 @@ if __name__ == "__main__":
     conway = GameOfLife((args.width, args.height),
                         args.timestamps, args.initconfig, args.rule,
                         args.looping_boundary, args.density,
-                        args.alpha, args.extremes)
-    conway.simulate(save=args.save)
+                        args.alpha, args.average_timestamp, args.extremes)
+    conway.simulate(vis=args.visualize, save=args.save)
+    print(sum(conway.density)/len(conway.density))
