@@ -17,9 +17,9 @@ class GameOfLife:
             rule: str,
             looping_boundary: bool,
             density: float,
-            alpha: float,           ## what fraction of the population gets updated
+            alpha: float,               ## what fraction of the population gets updated
             averageTimeStamp: int,
-            extremes: int           ## what +/- percent of 1 is to be considered for phase transition
+            extremes: tuple[int, int]   ## what value in replacement of 0, 1 is to be considered for phase transition
         ) -> None:
         
         if not isinstance(sizeXY, abc.Iterable):
@@ -38,6 +38,7 @@ class GameOfLife:
 
         self.alpha = alpha
         self.density = []
+        self.extremes = extremes
 
         if initConfig != None:
             self.automata = self.readInitConfig(initConfig)
@@ -234,8 +235,9 @@ if __name__ == "__main__":
             "RULE": "B3/S2,3",
             "DENSITY": 0.5,
             "ALPHA": 1,
-            "EXTREMES": 0,
-            "SAVEFILE": False
+            "EXTREMES": "0,1",
+            "SAVEFILE": False,
+            "SEED": None
         }
 
     parser.add_argument("-D", "--defaults", action="store_true")
@@ -249,25 +251,70 @@ if __name__ == "__main__":
     parser.add_argument("-l", "--looping-boundary", action="store_true")
     parser.add_argument("-d", "--density", default=DEFAULTS["DENSITY"], type=float)
     parser.add_argument("-a", "--alpha", default=DEFAULTS["ALPHA"], type=float)
-    parser.add_argument("-e", "--extremes", default=DEFAULTS["EXTREMES"], type=float)
+    parser.add_argument("-e", "--extremes", default=DEFAULTS["EXTREMES"], type=str, help="To pass only one extreme: `,upper_bound` or `lower_bound,`\nExample: `,.9889` ; `.2243,`")
 
+    parser.add_argument("-s", "--seed", default=DEFAULTS["SEED"], type=int)
     parser.add_argument("-V", "--visualize", action="store_true")
     parser.add_argument("-S", "--save", default=DEFAULTS["SAVEFILE"], type=str)
 
     args = parser.parse_args()
+
+    ## --------------- HELPER FUNCTIONS ----------------- ##
 
     def print_defaults() -> None:
         
         for k, v in DEFAULTS.items():
             print(k, ":", v)
 
+    def generate_seed() -> int:
+
+        return int(random.random() * 10000)
+
+    def parse_extremes() -> tuple[int, int]:
+
+        exts = args.extremes.split(",")
+        retExts = []
+        if len(exts) != 2:
+            raise Exception("Extremes must be passed as a string of two values separated by `,`.\n\nDefault: `0,1`")
+
+        try:
+            retExts.append(float(exts[0]))
+        except:
+            if exts[0] == "":
+                retExts.append(0)
+            else:
+                raise Exception("Extremes must be passed as a string of two floats separated by `,`.\nDefault: `0,1`")
+
+        try:
+            retExts.append(float(exts[1]))
+        except:
+            if exts[1] == "":
+                retExts.append(1)
+            else:
+                raise Exception("Extremes must be passed as a string of two floats separated by `,`.\nDefault: `0,1`")
+
+        return tuple(retExts)
+
+    ## --------------- SETUP CONDITIONS ----------------- ##
+
     if args.defaults:
         print_defaults()
         exit(0)
 
+    if args.seed == None:
+        seed = generate_seed()
+
+    ## --------------- START FROM HERE! ----------------- ##
+
     conway = GameOfLife((args.width, args.height),
                         args.timestamps, args.initconfig, args.rule,
                         args.looping_boundary, args.density,
-                        args.alpha, args.average_timestamp, args.extremes)
+                        args.alpha, args.average_timestamp, parse_extremes())
     conway.simulate(vis=args.visualize, save=args.save)
+    
+    ## average density
     print(sum(conway.density)/len(conway.density))
+
+    ## plot the density in a graph
+    plt.plot(conway.density)
+    plt.show()
