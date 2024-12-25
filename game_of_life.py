@@ -1,6 +1,6 @@
-from os import defpath
 import random
 import numpy as np
+from pathlib import Path
 from copy import deepcopy
 from collections import abc
 import matplotlib.pyplot as plt
@@ -15,6 +15,7 @@ class GameOfLife:
             timeStamps: int,
             initConfig: str | None,
             rule: str,
+            seed: int,
             looping_boundary: bool,
             density: float,
             alpha: float,               ## what fraction of the population gets updated
@@ -31,6 +32,7 @@ class GameOfLife:
         self.imgs: list[list[list[int]]] = []
         self.width = sizeXY[0]
         self.height = sizeXY[1]
+        self.seed = seed
         self.avts = averageTimeStamp
         self.timeStamps = timeStamps
         if not self.validateRule(rule):
@@ -84,6 +86,7 @@ class GameOfLife:
 
     def genInitConfig(self, density: float) -> list[list[int]]:
 
+        random.seed(self.seed)
         size = self.width * self.height
         if not 0 <= density <= 1:
             raise ValueError("Density must be between 0 and 1.")
@@ -192,7 +195,7 @@ class GameOfLife:
         
         ani = animation.ArtistAnimation(fig, frames, interval=800, blit=True)
         if isinstance(save, str):
-            ani.save(f"outputs/{save}.mp4")
+            ani.save(f"outputs/{save}/game.mp4")
         plt.show()
 
     def getNextIter(self, x: int, y: int) -> int:
@@ -219,8 +222,17 @@ class GameOfLife:
             if ts >= self.avts:
                 self.density.append(self.calcDensity())
             self.imgs.append(self.automata)
+        if isinstance(save, str):
+            Path(f"outputs/{save}/").mkdir(parents=True, exist_ok=True)     ## make sure the directory exists
+            self.save_seed(save)                                            ## save seed for reproducibility's sake
         if vis:
             self.record(save=save)
+
+    def save_seed(self, save: str) -> None:
+        
+        with open(f"outputs/{save}/seed.txt", "w") as fd:
+
+            fd.write(str(self.seed))
 
 if __name__ == "__main__":
     
@@ -302,18 +314,22 @@ if __name__ == "__main__":
         exit(0)
 
     if args.seed == None:
-        seed = generate_seed()
+        args.seed = generate_seed()
+
+    if args.average_timestamp > args.timestamps:
+        raise Exception("The timestamp to start counting the average from has to be smaller than the total number of timestamps")
 
     ## --------------- START FROM HERE! ----------------- ##
 
     conway = GameOfLife((args.width, args.height),
-                        args.timestamps, args.initconfig, args.rule,
+                        args.timestamps, args.initconfig, args.rule, args.seed,
                         args.looping_boundary, args.density,
                         args.alpha, args.average_timestamp, parse_extremes())
     conway.simulate(vis=args.visualize, save=args.save)
     
     ## average density
     print(sum(conway.density)/len(conway.density))
+    print(conway.density)
 
     ## plot the density in a graph
     plt.plot(conway.density)
