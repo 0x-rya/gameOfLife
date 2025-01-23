@@ -141,7 +141,10 @@ class GameOfLife:
             return True
 
         except:
-            return False
+            if rule in self.rulesDict.keys():
+                return self.validateRule(self.rulesDict[rule])
+            else:
+                return False
 
     def getNeighbours(self, x: int, y: int) -> list[int]:
         
@@ -194,9 +197,9 @@ class GameOfLife:
             frames.append([plt.imshow(self.imgs[i], animated=True)])
         
         ani = animation.ArtistAnimation(fig, frames, interval=800, blit=True)
-        if isinstance(save, str):
-            ani.save(f"outputs/{save}/game.mp4")
         plt.show()
+        if isinstance(save, str):
+            ani.save(f"outputs/{self.rule.replace('/', '-')}/alpha-{self.alpha}/{save}/game.mp4")
 
     def getNextIter(self, x: int, y: int) -> int:
 
@@ -217,22 +220,34 @@ class GameOfLife:
     def simulate(self, vis: bool, save: bool | str):
 
         self.imgs.append(self.automata)
+        self.density.append(self.calcDensity())
         for ts in range(self.timeStamps):
             self.updateAutomata()
-            if ts >= self.avts:
-                self.density.append(self.calcDensity())
+            # if ts >= self.avts:
+            self.density.append(self.calcDensity())
             self.imgs.append(self.automata)
         if isinstance(save, str):
-            Path(f"outputs/{save}/").mkdir(parents=True, exist_ok=True)     ## make sure the directory exists
+            Path(f"outputs/{self.rule.replace('/', '-')}/alpha-{self.alpha}/{save}/").mkdir(parents=True, exist_ok=True)     ## make sure the directory exists
             self.save_seed(save)                                            ## save seed for reproducibility's sake
+            self.save_density(save)
         if vis:
             self.record(save=save)
 
+    def getAvgDensity(self) -> float:
+
+        return sum(self.density[:self.avts]) / len(self.density[:self.avts])
+
     def save_seed(self, save: str) -> None:
         
-        with open(f"outputs/{save}/seed.txt", "w") as fd:
+        with open(f"outputs/{self.rule.replace('/', '-')}/alpha-{self.alpha}/{save}/seed.txt", "w") as fd:
 
             fd.write(str(self.seed))
+
+    def save_density(self, save: str) -> None:
+
+        ## plot the density in a graph
+        plt.plot(conway.density)
+        plt.savefig(f"outputs/{self.rule.replace('/', '-')}/alpha-{self.alpha}/{save}/density.png")
 
 if __name__ == "__main__":
     
@@ -328,9 +343,5 @@ if __name__ == "__main__":
     conway.simulate(vis=args.visualize, save=args.save)
     
     ## average density
-    print(sum(conway.density)/len(conway.density))
     print(conway.density)
-
-    ## plot the density in a graph
-    plt.plot(conway.density)
-    plt.show()
+    print(sum(conway.density)/len(conway.density))
