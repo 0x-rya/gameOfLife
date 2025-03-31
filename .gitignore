@@ -8,6 +8,14 @@ __pycache__/
 
 # Ignore the outputs directory
 outputs/
+outputs_backup/
+
+# Ignore the log files
+*.log
+log.*
+
+# Ignore vscode
+.vscode/
 
 # Ignore Mac Finder Files
 *.DS_store
