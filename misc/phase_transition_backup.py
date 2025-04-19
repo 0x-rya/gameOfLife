@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
     def log(text: str) -> None:
 
-        print(f"{datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]} - {text}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - {text}")
 
     def generate_seed() -> int:
 
@@ -63,8 +63,8 @@ if __name__ == "__main__":
         print(f"Incorrect usage.\nCorrect Usage:\n\t\tpython3 {sys.argv[0]}\n\t\tpython3 {sys.argv[0]} N_ITERS")
         exit(0)
 
-    DEFAULTS["SEED"] = generate_seed()
-    log(f"No seed provided, generating random seed: {DEFAULTS["SEED"]}")
+    DEFAULTS["SEED"] = 1433 # generate_seed()
+    log(f"No seed provided, generating random seed: {DEFAULTS['SEED']}")
 
     if len(args) == 1:
 
@@ -158,7 +158,7 @@ if __name__ == "__main__":
 
         return returnList
 
-    def plot_phase_transitions_with_bump(data: list[float], alpha_scale: list[float], transitions: list, rule: str, lower_threshold = 0.05, upper_threshold = 0.95, min_bump = 0.2):
+    def plot_phase_transitions_with_bump(data: list[float], alpha_scale: list[float], transitions: list, rule: str, lower_threshold = 0.05, upper_threshold = 0.95, min_bump = 1.5):
 
         plt.figure(figsize=(10, 6))
         plt.plot(alpha_scale, data,marker='o', label="Data Values")
@@ -182,6 +182,7 @@ if __name__ == "__main__":
         plt.grid(True)
         plt.savefig(f"outputs/{rule.replace('/', '-')}/plot")
         # plt.show()
+        plt.close()
 
     random.seed(DEFAULTS["SEED"])
     usedRules = set()
