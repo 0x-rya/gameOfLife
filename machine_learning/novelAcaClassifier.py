@@ -2,13 +2,16 @@ import sys
 import random
 import numpy as np
 import pandas as pd
-from collections import defaultdict, Counter
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from collections import defaultdict
 
 class ACA:
-    def __init__(self, rule_num, n_cells, max_steps=1000):
+    def __init__(self, rule_num, n_cells):
         self.rule_num = rule_num
         self.n_cells = n_cells
-        self.max_steps = max_steps
         self.rule_table = self._get_rule_table(rule_num)
 
     def _get_rule_table(self, rule):
@@ -19,242 +22,530 @@ class ACA:
             key = tuple(int(b) for b in f"{7 - i:03b}")
             table[key] = int(binary[i])
         return table
-
+    
     def _get_neighborhood(self, state, idx):
         """Returns (left, center, right) neighborhood with wraparound."""
         n = self.n_cells
         return (state[(idx - 1) % n], state[idx], state[(idx + 1) % n])
 
-class NeuralACA(ACA):
-    def __init__(self, rule_num, n_cells, max_steps=1000, learning_rate=0.01):
-        super().__init__(rule_num, n_cells, max_steps)
-        # Initialize weights and biases for the neural network
-        self.weights = np.random.randn(n_cells) * 0.01  # Small initial weights
-        self.biases = np.random.randn(n_cells) * 0.01   # Small initial biases
-        self.learning_rate = learning_rate
-        self.threshold = 0.5  # Threshold for binary activation
-        
-        # Pre-compute all possible neighborhoods for faster lookup
-        self.neighborhood_lookup = {}
-        for i in range(n_cells):
-            self.neighborhood_lookup[i] = [(i-1) % n_cells, i, (i+1) % n_cells]
 
-    def sigmoid(self, x):
-        """Sigmoid activation function - vectorized"""
-        return 1 / (1 + np.exp(-np.clip(x, -15, 15)))  # Clip to avoid overflow
+class PhaseDataset(Dataset):
+    """Dataset for phase transition data"""
+    def __init__(self, data, n_cells):
+        self.data = data
+        self.n_cells = n_cells
+        
+    def __len__(self):
+        return len(self.data)
     
-    def sigmoid_derivative(self, x):
-        """Derivative of sigmoid function - vectorized"""
-        sig = self.sigmoid(x)
-        return sig * (1 - sig)
-    
-    def compute_mask(self, state):
-        """Compute mask based on neural network - vectorized"""
-        # Forward pass - vectorized operations
-        z = np.dot(state, self.weights) + self.biases
-        activation = self.sigmoid(z)
-        # Convert to binary mask based on threshold
-        mask = (activation > self.threshold).astype(int)
-        return mask, z, activation
-    
-    def apply_rule_vectorized(self, state, mask):
-        """Apply CA rules to all cells where mask is 1 in a vectorized manner"""
-        new_state = state.copy()
+    def __getitem__(self, idx):
+        initial_state, target_phase = self.data[idx]
         
-        # Get indices where mask is 1
-        idx_to_update = np.where(mask == 1)[0]
+        # Pad or truncate to n_cells
+        if len(initial_state) < self.n_cells:
+            initial_state = np.pad(initial_state, (0, self.n_cells - len(initial_state)))
+        elif len(initial_state) > self.n_cells:
+            initial_state = initial_state[:self.n_cells]
         
-        # Create arrays for left, center, right values for all indices at once
-        left_indices = (idx_to_update - 1) % self.n_cells
-        right_indices = (idx_to_update + 1) % self.n_cells
+        # Convert to tensors
+        initial_state_tensor = torch.FloatTensor(initial_state)
+        target_phase_tensor = torch.tensor(target_phase, dtype=torch.long)
         
-        left_values = state[left_indices]
-        center_values = state[idx_to_update]
-        right_values = state[right_indices]
+        return initial_state_tensor, target_phase_tensor
+
+
+class NeuralACAModel(nn.Module):
+    """PyTorch model for Neural ACA"""
+    def __init__(self, n_cells):
+        super(NeuralACAModel, self).__init__()
+        self.linear = nn.Linear(n_cells, n_cells)
+        self.sigmoid = nn.Sigmoid()
         
-        # Apply rules using vectorized operations
-        for i, idx in enumerate(idx_to_update):
-            neighborhood = (left_values[i], center_values[i], right_values[i])
-            new_state[idx] = self.rule_table[neighborhood]
-            
-        return new_state
-    
-    def evolve(self, initial_state=None, training=False, target_phase=0):
-        """Optimized version that evolves the ACA using neural network mask"""
-        if initial_state is None:
-            state = np.random.randint(0, 2, size=self.n_cells)
-        else:
-            state = np.array(initial_state, dtype=np.int8)
-            
-            # Pad or truncate if necessary
-            if len(state) < self.n_cells:
-                state = np.pad(state, (0, self.n_cells - len(state)))
-            elif len(state) > self.n_cells:
-                state = state[:self.n_cells]
+    def forward(self, x):
+        # Simple feedforward network that outputs mask probabilities
+        return self.sigmoid(self.linear(x))
+
+
+class NeuralACA(ACA):
+    def __init__(self, rule_num, n_cells, max_steps=100, learning_rate=0.01, device=None):
+        super().__init__(rule_num, n_cells)
+        self.max_steps = max_steps
+        self.learning_rate = learning_rate
         
-        # Pre-allocate history array for speed
-        if training:
-            # During training we only need final state
-            history = None
-        else:
-            history = [state.copy()]
+        # Set up device (GPU if available)
+        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
         
-        for _ in range(self.max_steps):
-            # Compute mask using neural network
-            mask, z, activation = self.compute_mask(state)
-            
-            # Apply cellular automaton rules to masked cells
-            state = self.apply_rule_vectorized(state, mask)
-            
-            if not training and history is not None:
-                history.append(state.copy())
-            
-            # Perform backpropagation during training
-            if training:
-                self._backpropagate(state, z, target_phase)
+        # Set up PyTorch model
+        self.model = NeuralACAModel(n_cells).to(self.device)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        self.criterion = nn.MSELoss()
+        self.threshold = 0.5
         
-        return state, history
-    
-    def _backpropagate(self, state, z, target_phase):
-        """Performs vectorized backpropagation to update weights and biases"""
-        # Create target pattern based on phase transition type
-        half_point = self.n_cells // 2
-        target_pattern = np.zeros(self.n_cells, dtype=np.int8)
+        # Create tensors for rule lookup
+        self.setup_differentiable_rule_table()
         
-        if target_phase == 0:
-            target_pattern[:half_point] = 1
-        else:
-            target_pattern[half_point:] = 1
+    def setup_differentiable_rule_table(self):
+        """Set up tensors for differentiable rule application"""
+        # Create rule tensor that maps neighborhood patterns to outputs
+        rule_tensor = torch.zeros(2, 2, 2, device=self.device)
         
-        # Compute vectorized gradients
-        activation = self.sigmoid(z)
-        error = target_pattern - activation
-        d_activation = error * self.sigmoid_derivative(z)
-        
-        # Update weights and biases using gradient descent
-        self.weights += self.learning_rate * np.dot(state, d_activation)
-        self.biases += self.learning_rate * d_activation
+        # Fill the tensor based on the rule table
+        for left in range(2):
+            for center in range(2):
+                for right in range(2):
+                    neighborhood = (left, center, right)
+                    rule_tensor[left, center, right] = self.rule_table[neighborhood]
+                    
+        self.rule_tensor = rule_tensor
     
     def load_dataset(self, filepath):
         """Load dataset from CSV file without headers"""
         # Load CSV without headers and assign column names
         df = pd.read_csv(filepath, header=None, names=['input', 'pt', 'num_pt'])
+        data = []
         
-        # Convert all at once using numpy for better performance
-        inputs = []
-        pts = df['pt'].astype(int).values
-        
-        for input_str in df['input'].values:
-            inputs.append(np.array([int(bit) for bit in input_str], dtype=np.int8))
-        
-        return list(zip(inputs, pts))
+        for _, row in df.iterrows():
+            # Check if input is already a number and convert to binary representation
+            if isinstance(row['input'], (int, np.int64, float, np.float64)):
+                # Convert number to binary string and then to list of integers
+                input_str = format(int(row['input']), f'0{self.n_cells}b')
+                input_state = [int(bit) for bit in input_str]
+            else:
+                # Convert input string to list of integers
+                input_state = [int(bit) for bit in row['input']]
+            
+            # Get phase transition label
+            pt = int(row['pt'])
+            
+            data.append((input_state, pt))
+            
+        return data
     
-    def train_on_dataset(self, dataset, epochs=100, batch_size=32):
-        """Train the neural network using the provided dataset with mini-batches"""
-        dataset_size = len(dataset)
-        losses = np.zeros(epochs)
+    def apply_differentiable_rule(self, state, mask_probs):
+        """Apply CA rules in a differentiable manner using soft masking"""
+        batch_size = 1 if len(state.shape) == 1 else state.shape[0]
         
-        # Convert inputs to numpy arrays for better performance
-        inputs = []
-        targets = []
-        for input_state, target in dataset:
-            # Ensure correct length
-            if len(input_state) < self.n_cells:
-                input_state = np.pad(input_state, (0, self.n_cells - len(input_state)))
-            elif len(input_state) > self.n_cells:
-                input_state = input_state[:self.n_cells]
-            inputs.append(input_state)
-            targets.append(target)
+        # Ensure state is properly shaped
+        if len(state.shape) == 1:
+            state = state.unsqueeze(0)
+            mask_probs = mask_probs.unsqueeze(0)
         
-        inputs = np.array(inputs, dtype=np.int8)
-        targets = np.array(targets, dtype=np.int8)
+        result = torch.zeros_like(state)
         
-        for epoch in range(epochs):
-            # Shuffle dataset indices
-            indices = np.random.permutation(dataset_size)
-            epoch_loss = 0
+        for b in range(batch_size):
+            current_state = state[b]
+            current_mask = mask_probs[b]
             
-            # Process in mini-batches for better performance
-            for start_idx in range(0, dataset_size, batch_size):
-                end_idx = min(start_idx + batch_size, dataset_size)
-                batch_indices = indices[start_idx:end_idx]
+            for i in range(self.n_cells):
+                # Get neighborhood
+                left = current_state[(i - 1) % self.n_cells]
+                center = current_state[i]
+                right = current_state[(i + 1) % self.n_cells]
                 
-                batch_loss = 0
-                for idx in batch_indices:
-                    final_state, _ = self.evolve(inputs[idx], training=True, target_phase=targets[idx])
-                    
-                    # Calculate loss
-                    half_point = self.n_cells // 2
-                    if targets[idx] == 0:
-                        expected = np.concatenate([np.ones(half_point), np.zeros(self.n_cells - half_point)])
-                    else:
-                        expected = np.concatenate([np.zeros(half_point), np.ones(self.n_cells - half_point)])
-                    
-                    batch_loss += np.mean((final_state - expected) ** 2)
+                # Compute neighborhood probabilities - each value is between 0 and 1
+                # Interpolate between 0 and 1 for each position in the neighborhood
+                p_left_0 = 1.0 - left
+                p_left_1 = left
+                p_center_0 = 1.0 - center
+                p_center_1 = center
+                p_right_0 = 1.0 - right
+                p_right_1 = right
                 
-                epoch_loss += batch_loss / len(batch_indices)
-            
-            losses[epoch] = epoch_loss / ((dataset_size + batch_size - 1) // batch_size)
-            
-            if epoch % 10 == 0 or epoch == epochs - 1:
-                print(f"Epoch {epoch}, Loss: {losses[epoch]:.4f}")
+                # Calculate rule outputs for all 8 possible neighborhoods
+                # Weighted by the probability of each neighborhood
+                rule_output = 0.0
+                rule_output += p_left_0 * p_center_0 * p_right_0 * self.rule_table[(0, 0, 0)]
+                rule_output += p_left_0 * p_center_0 * p_right_1 * self.rule_table[(0, 0, 1)]
+                rule_output += p_left_0 * p_center_1 * p_right_0 * self.rule_table[(0, 1, 0)]
+                rule_output += p_left_0 * p_center_1 * p_right_1 * self.rule_table[(0, 1, 1)]
+                rule_output += p_left_1 * p_center_0 * p_right_0 * self.rule_table[(1, 0, 0)]
+                rule_output += p_left_1 * p_center_0 * p_right_1 * self.rule_table[(1, 0, 1)]
+                rule_output += p_left_1 * p_center_1 * p_right_0 * self.rule_table[(1, 1, 0)]
+                rule_output += p_left_1 * p_center_1 * p_right_1 * self.rule_table[(1, 1, 1)]
+                
+                # Soft update based on mask probability
+                result[b, i] = current_mask[i] * rule_output + (1 - current_mask[i]) * current_state[i]
         
-        return losses
+        # If input was 1D, return 1D
+        if len(state.shape) == 1:
+            result = result.squeeze(0)
+            
+        return result
     
-    def evaluate_dataset(self, dataset):
-        """Efficiently evaluate the model on dataset"""
-        dataset_size = len(dataset)
-        confidence_scores = np.zeros(dataset_size)
+    def compute_expected_state(self, target_phase):
+        """Compute expected final state based on target phase"""
+        half_point = self.n_cells // 2
+        expected = torch.zeros(self.n_cells, device=self.device)
+        
+        if target_phase == 0:
+            expected[:half_point] = 1.0
+        else:
+            expected[half_point:] = 1.0
+            
+        return expected
+    
+    def calculate_confidence(self, state, target_phase):
+        """Calculate confidence score for a state"""
+        state_np = state.cpu().numpy() if torch.is_tensor(state) else state
         half_point = self.n_cells // 2
         
-        for i, (initial_state, target_phase) in enumerate(dataset):
-            # Ensure correct length
+        if target_phase == 0:
+            first_half_score = np.sum(state_np[:half_point]) / half_point
+            second_half_score = (half_point - np.sum(state_np[half_point:])) / (self.n_cells - half_point)
+        else:
+            first_half_score = (half_point - np.sum(state_np[:half_point])) / half_point
+            second_half_score = np.sum(state_np[half_point:]) / (self.n_cells - half_point)
+        
+        return (first_half_score + second_half_score) / 2
+    
+    def evolve_step(self, state):
+        """One step of evolution using the neural network mask"""
+        # Get mask from neural network
+        self.model.eval()
+        with torch.no_grad():
+            mask_probs = self.model(state)
+            # For evaluation, use hard thresholding
+            mask = (mask_probs > self.threshold).float()
+            # Apply CA rules using traditional method for evaluation
+            new_state = self.apply_rule(state, mask)
+        return new_state
+    
+    def apply_rule(self, state, mask):
+        """Apply CA rules to cells marked by mask (non-differentiable version)"""
+        state_np = state.cpu().numpy() if torch.is_tensor(state) else state.copy()
+        mask_np = mask.cpu().numpy() if torch.is_tensor(mask) else mask.copy()
+        
+        # Find indices where mask is 1
+        indices = np.where(mask_np > 0.5)[0]
+        
+        # Create new state array
+        new_state = state_np.copy()
+        
+        # Apply rule to each marked cell
+        for idx in indices:
+            neighborhood = self._get_neighborhood(state_np, idx)
+            new_state[idx] = self.rule_table[neighborhood]
+            
+        return torch.tensor(new_state, dtype=torch.float32, device=self.device) if torch.is_tensor(state) else new_state
+    
+    def evolve(self, initial_state=None, keep_history=False):
+        """Run CA evolution for max_steps"""
+        if initial_state is None:
+            initial_state = torch.randint(0, 2, (self.n_cells,), device=self.device).float()
+        elif not torch.is_tensor(initial_state):
+            # Convert to tensor and ensure right shape
             if len(initial_state) < self.n_cells:
                 initial_state = np.pad(initial_state, (0, self.n_cells - len(initial_state)))
             elif len(initial_state) > self.n_cells:
                 initial_state = initial_state[:self.n_cells]
-                
-            final_state, _ = self.evolve(initial_state)
-            
-            # Calculate confidence score with vectorized operations
-            if target_phase == 0:
-                first_half_score = np.sum(final_state[:half_point]) / half_point
-                second_half_score = (half_point - np.sum(final_state[half_point:])) / (self.n_cells - half_point)
-            else:
-                first_half_score = (half_point - np.sum(final_state[:half_point])) / half_point
-                second_half_score = np.sum(final_state[half_point:]) / (self.n_cells - half_point)
-            
-            confidence_scores[i] = (first_half_score + second_half_score) / 2
+            initial_state = torch.tensor(initial_state, dtype=torch.float32, device=self.device)
         
-        return np.mean(confidence_scores)
+        state = initial_state
+        history = [state.clone().cpu().numpy()] if keep_history else None
+        
+        for _ in range(self.max_steps):
+            state = self.evolve_step(state)
+            
+            if keep_history:
+                history.append(state.clone().cpu().numpy())
+        
+        return state, history
+    
+    def train_on_dataset(self, dataset, epochs=100, batch_size=32):
+        """Train using PyTorch DataLoader with differentiable operations"""
+        # Create dataset and dataloader for efficient batching
+        phase_dataset = PhaseDataset(dataset, self.n_cells)
+        dataloader = DataLoader(phase_dataset, batch_size=batch_size, shuffle=True)
+        
+        losses = []
+        
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            
+            print(f"Batch:", end=" ", flush=True)
+            for bn, (batch_states, batch_targets) in enumerate(dataloader):
+                
+                print(f"{bn + 1}/{len(dataloader)}", end=" ", flush=True)
+                batch_states = batch_states.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+                
+                # Process entire batch at once
+                self.model.train()
+                self.optimizer.zero_grad()
+                
+                # Keep track of states for all examples in batch
+                current_batch_states = batch_states
+                
+                # Run evolution for specified steps
+                for _ in range(self.max_steps):
+                    # Get mask probabilities from neural network
+                    mask_probs = self.model(current_batch_states)
+                    
+                    # Apply differentiable rule using mask probabilities
+                    current_batch_states = self.apply_differentiable_rule(current_batch_states, mask_probs)
+                
+                # Compute loss for each example against expected state
+                batch_loss = 0.0
+                for i in range(len(batch_states)):
+                    expected = self.compute_expected_state(batch_targets[i].item())
+                    loss = self.criterion(current_batch_states[i], expected)
+                    batch_loss += loss
+                
+                # Average loss over batch
+                batch_loss = batch_loss / len(batch_states)
+                
+                # Backward pass and optimization
+                batch_loss.backward()
+                self.optimizer.step()
+                
+                epoch_loss += batch_loss.item()
+            
+            avg_loss = epoch_loss / len(dataloader)
+            losses.append(avg_loss)
+            
+            # if epoch % 10 == 0 or epoch == epochs - 1:
+            print(f"Epoch {epoch}, Loss: {avg_loss:.6f}")
+                
+        return losses
+    
+    # def evaluate_dataset(self, dataset):
+    #     """Evaluate model on dataset"""
+    #     self.model.eval()
+    #     confidences = []
+        
+    #     with torch.no_grad():
+    #         for initial_state, target_phase in dataset:
+    #             # Convert to tensor and ensure right shape
+    #             if len(initial_state) < self.n_cells:
+    #                 initial_state = np.pad(initial_state, (0, self.n_cells - len(initial_state)))
+    #             elif len(initial_state) > self.n_cells:
+    #                 initial_state = initial_state[:self.n_cells]
+                    
+    #             initial_state_tensor = torch.tensor(initial_state, dtype=torch.float32, device=self.device)
+                
+    #             # Run evolution
+    #             final_state, _ = self.evolve(initial_state_tensor)
+                
+    #             # Calculate confidence score
+    #             confidence = self.calculate_confidence(final_state, target_phase)
+    #             confidences.append(confidence)
+                
+    #     return np.mean(confidences)
+    
+    def save_model(self, path):
+        """Save trained model"""
+        torch.save(self.model.state_dict(), path)
+        
+    def load_model(self, path):
+        """Load trained model"""
+        self.model.load_state_dict(torch.load(path))
+        self.model.eval()
 
-# Example usage with optimized performance:
+    def load_and_split_dataset(self, filepath, test_size=0.2, random_seed=42):
+        """Load dataset from CSV file and split into training and test sets"""
+        # Load CSV without headers and assign column names
+        df = pd.read_csv(filepath, header=None, names=['input', 'pt', 'num_pt'])
+        data = []
+        
+        for _, row in df.iterrows():
+            # Check if input is already a number and convert to binary representation
+            if isinstance(row['input'], (int, np.int64, float, np.float64)):
+                # Convert number to binary string and then to list of integers
+                input_str = format(int(row['input']), f'0{self.n_cells}b')
+                input_state = [int(bit) for bit in input_str]
+            else:
+                # Original code path for string inputs
+                input_state = [int(bit) for bit in row['input']]
+            
+            # Get phase transition label
+            pt = int(row['pt'])
+            
+            data.append((input_state, pt))
+        
+        # Set random seed for reproducibility
+        random.seed(random_seed)
+        
+        # Shuffle and split the data
+        random.shuffle(data)
+        split_idx = int(len(data) * (1 - test_size))
+        train_data = data[:split_idx]
+        test_data = data[split_idx:]
+        
+        print(f"Dataset split: {len(train_data)} training samples, {len(test_data)} test samples")
+        
+        return train_data, test_data
+
+    def train_and_evaluate(self, train_data, test_data, epochs=100, batch_size=32):
+        """Train the model and evaluate after each epoch"""
+        # Create datasets and dataloaders
+        train_dataset = PhaseDataset(train_data, self.n_cells)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
+        # Track metrics
+        train_losses = []
+        train_accuracies = []
+        test_accuracies = []
+        
+        for epoch in range(epochs):
+            # Training phase
+            self.model.train()
+            epoch_loss = 0.0
+            
+            for batch_states, batch_targets in train_dataloader:
+                batch_states = batch_states.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+                
+                self.optimizer.zero_grad()
+                
+                # Keep track of states for all examples in batch
+                current_batch_states = batch_states
+                
+                # Run evolution for specified steps
+                for _ in range(self.max_steps):
+                    # Get mask probabilities from neural network
+                    mask_probs = self.model(current_batch_states)
+                    
+                    # Apply differentiable rule using mask probabilities
+                    current_batch_states = self.apply_differentiable_rule(current_batch_states, mask_probs)
+                
+                # Compute loss for each example against expected state
+                batch_loss = 0.0
+                for i in range(len(batch_states)):
+                    expected = self.compute_expected_state(batch_targets[i].item())
+                    loss = self.criterion(current_batch_states[i], expected)
+                    batch_loss += loss
+                
+                # Average loss over batch
+                batch_loss = batch_loss / len(batch_states)
+                
+                # Backward pass and optimization
+                batch_loss.backward()
+                self.optimizer.step()
+                
+                epoch_loss += batch_loss.item()
+            
+            avg_loss = epoch_loss / len(train_dataloader)
+            train_losses.append(avg_loss)
+            
+            # Evaluate on train and test sets after each epoch
+            train_accuracy = self.evaluate_dataset(train_data)
+            test_accuracy = self.evaluate_dataset(test_data)
+            
+            train_accuracies.append(train_accuracy)
+            test_accuracies.append(test_accuracy)
+            
+            # Print progress
+            # if epoch % 10 == 0 or epoch == epochs - 1:
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.6f}, Train Acc: {train_accuracy:.4f}, Test Acc: {test_accuracy:.4f}")
+        
+        # Return collected metrics
+        return {
+            'train_losses': train_losses,
+            'train_accuracies': train_accuracies,
+            'test_accuracies': test_accuracies
+        }
+
+    def evaluate_dataset(self, dataset):
+        """Evaluate model on dataset and return accuracy"""
+        self.model.eval()
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for initial_state, target_phase in dataset:
+                # Convert to tensor and ensure right shape
+                if len(initial_state) < self.n_cells:
+                    initial_state = np.pad(initial_state, (0, self.n_cells - len(initial_state)))
+                elif len(initial_state) > self.n_cells:
+                    initial_state = initial_state[:self.n_cells]
+                    
+                initial_state_tensor = torch.tensor(initial_state, dtype=torch.float32, device=self.device)
+                
+                # Run evolution
+                final_state, _ = self.evolve(initial_state_tensor)
+                
+                # Calculate confidence score
+                confidence = self.calculate_confidence(final_state, target_phase)
+                
+                # Determine if prediction is correct (confidence > 0.5)
+                if confidence > 0.5:
+                    correct += 1
+                total += 1
+        
+        accuracy = correct / total if total > 0 else 0
+        return accuracy
+
+# Modified main function
 if __name__ == "__main__":
     import time
+    import matplotlib.pyplot as plt
 
     args = sys.argv[1:]
     if len(args) != 1:
-        print("Usage: python neural_aca.py <dataset_path>")
+        print(f"Usage: python {sys.argv[0]} <dataset_path>")
         sys.exit(1)
     dataset_path = args[0]
     
     # Create a Neural ACA with appropriate cell count
     n_cells = 16  # For this example
-    neural_aca = NeuralACA(rule_num=30, n_cells=n_cells, max_steps=50, learning_rate=0.1)
+    neural_aca = NeuralACA(rule_num=30, n_cells=n_cells, max_steps=10, learning_rate=0.01)
     
-    # Load dataset
+    # Load and split dataset
     start_time = time.time()
-    dataset = neural_aca.load_dataset(dataset_path)
-    print(f"Loaded {len(dataset)} samples in {time.time() - start_time:.4f} seconds")
+    train_data, test_data = neural_aca.load_and_split_dataset(dataset_path)
+    print(f"Loaded and split dataset in {time.time() - start_time:.4f} seconds")
     
-    # Train on dataset
-    print("\nTraining on dataset...")
+    # Train on dataset with evaluation
+    print("\nTraining on dataset with evaluation after each epoch...")
     start_time = time.time()
-    losses = neural_aca.train_on_dataset(dataset, epochs=200, batch_size=32)
-    print(f"Training completed in {time.time() - start_time:.4f} seconds")
+    metrics = neural_aca.train_and_evaluate(train_data, test_data, epochs=15, batch_size=32)
+    print(f"Training and evaluation completed in {time.time() - start_time:.4f} seconds")
     
-    # Evaluate
+    # Plot training metrics
+    plt.figure(figsize=(12, 8))
+    
+    # Plot loss
+    plt.subplot(2, 1, 1)
+    plt.plot(metrics['train_losses'])
+    plt.title('Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    # Plot accuracies
+    plt.subplot(2, 1, 2)
+    plt.plot(metrics['train_accuracies'], label='Train Accuracy')
+    plt.plot(metrics['test_accuracies'], label='Test Accuracy')
+    plt.title('Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('training_metrics.png')
+    plt.close()
+    print("\nTraining metrics plot saved to 'training_metrics.png'")
+    
+    # Test with a specific example from test set
+    print("\nTesting with first example from test set:")
+    initial_state, target_phase = test_data[0]
+    print(f"Initial state: {''.join(map(str, initial_state))}")
+    print(f"Target phase: {target_phase}")
+    
+    # Run evolution
     start_time = time.time()
-    avg_confidence = neural_aca.evaluate_dataset(dataset)
-    print(f"\nEvaluation completed in {time.time() - start_time:.4f} seconds")
-    print(f"Average confidence score on dataset: {avg_confidence * 100:.2f}%")
+    final_state, history = neural_aca.evolve(initial_state, keep_history=True)
+    print(f"Evolution completed in {time.time() - start_time:.4f} seconds")
+    
+    # Convert final state to string representation
+    final_state_np = final_state.cpu().numpy()
+    final_state_str = ''.join(['1' if cell > 0.5 else '0' for cell in final_state_np])
+    print(f"Final state: {final_state_str}")
+    
+    # Calculate confidence score
+    confidence = neural_aca.calculate_confidence(final_state, target_phase)
+    print(f"Confidence score: {confidence:.4f}")
+    
+    # Save model
+    neural_aca.save_model("neural_aca_model.pth")
+    print("\nModel saved to neural_aca_model.pth")
